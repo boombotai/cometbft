@@ -6,9 +6,7 @@ import (
 	na "github.com/cometbft/cometbft/p2p/netaddr"
 )
 
-// Transport emits and connects to Peers. The implementation of Peer is left to
-// the transport. Each transport is also responsible to filter establishing
-// peers specific to its domain.
+// Transport connects the local node to the rest of the network.
 type Transport interface {
 	// NetAddr returns the network address of the local node.
 	NetAddr() na.NetAddr
