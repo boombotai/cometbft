@@ -56,7 +56,7 @@ type Peer interface {
 	IsPersistent() bool // do we redial this peer when we disconnect
 
 	// Conn returns the underlying connection.
-	Conn() net.Conn
+	Conn() Connection
 
 	NodeInfo() ni.NodeInfo // peer's info
 	Status() tcpconn.ConnectionStatus
@@ -79,7 +79,7 @@ type Peer interface {
 type peerConn struct {
 	outbound   bool
 	persistent bool
-	conn       net.Conn // Source connection
+	conn       Connection // Source connection
 
 	socketAddr *na.NetAddr
 
@@ -89,7 +89,7 @@ type peerConn struct {
 
 func newPeerConn(
 	outbound, persistent bool,
-	conn net.Conn,
+	conn Connection,
 	socketAddr *na.NetAddr,
 ) peerConn {
 	return peerConn{
@@ -134,9 +134,7 @@ func (pc peerConn) RemoteIP() net.IP {
 type peer struct {
 	service.BaseService
 
-	// raw peerConn and the multiplex connection
 	peerConn
-	mconn *tcpconn.MConnection
 
 	// peer's node info and the channel it knows about
 	// channels = nodeInfo.Channels
@@ -175,15 +173,8 @@ func newPeer(
 		pendingMetrics: newPeerPendingMetricsCache(),
 	}
 
-	p.mconn = createMConnection(
-		pc.conn,
-		p,
-		reactorsByCh,
-		msgTypeByChID,
-		streams,
-		onPeerError,
-		mConfig,
-	)
+	go p.readLoop()
+
 	p.BaseService = *service.NewBaseService(nil, "Peer", p)
 	for _, option := range options {
 		option(p)
@@ -192,13 +183,54 @@ func newPeer(
 	return p
 }
 
+func (p *peer) readLoop() {
+	for {
+		select {
+		case <-p.Quit():
+			return
+		default:
+			_, err := p.peerConn.conn.Read()
+			if err != nil {
+				p.Logger.Debug("Error reading from connection", "err", err)
+				p.Stop()
+				return
+			}
+
+			reactor := reactorsByCh[chID]
+			if reactor == nil {
+				// Note that its ok to panic here as it's caught in the conn._recover,
+				// which does onPeerError.
+				panic(fmt.Sprintf("Unknown channel %X", chID))
+			}
+			mt := msgTypeByChID[chID]
+			msg := proto.Clone(mt)
+			err := proto.Unmarshal(msgBytes, msg)
+			if err != nil {
+				panic(fmt.Sprintf("unmarshaling message: %v into type: %s", err, reflect.TypeOf(mt)))
+			}
+			if w, ok := msg.(types.Unwrapper); ok {
+				msg, err = w.Unwrap()
+				if err != nil {
+					panic(fmt.Sprintf("unwrapping message: %v", err))
+				}
+			}
+			p.pendingMetrics.AddPendingRecvBytes(getMsgType(msg), len(msgBytes))
+			reactor.Receive(Envelope{
+				ChannelID: chID,
+				Src:       p,
+				Message:   msg,
+			})
+		}
+	}
+}
+
 // String representation.
 func (p *peer) String() string {
 	if p.outbound {
-		return fmt.Sprintf("Peer{%v %v out}", p.mconn, p.ID())
+		return fmt.Sprintf("Peer{%v %v out}", p.conn, p.ID())
 	}
 
-	return fmt.Sprintf("Peer{%v %v in}", p.mconn, p.ID())
+	return fmt.Sprintf("Peer{%v %v in}", p.conn, p.ID())
 }
 
 // ---------------------------------------------------
@@ -207,7 +239,7 @@ func (p *peer) String() string {
 // SetLogger implements BaseService.
 func (p *peer) SetLogger(l log.Logger) {
 	p.Logger = l
-	p.mconn.SetLogger(l)
+	// p.mconn.SetLogger(l)
 }
 
 // OnStart implements BaseService.
@@ -216,9 +248,9 @@ func (p *peer) OnStart() error {
 		return err
 	}
 
-	if err := p.mconn.Start(); err != nil {
-		return err
-	}
+	// if err := p.mconn.Start(); err != nil {
+	// 	return err
+	// }
 
 	go p.metricsReporter()
 	return nil
@@ -229,14 +261,15 @@ func (p *peer) OnStart() error {
 //
 // NOTE: it is not safe to call this method more than once.
 func (p *peer) FlushStop() {
-	p.mconn.FlushStop() // stop everything and close the conn
+	p.conn.FlushAndClose("stopping peer") // stop everything and close the conn
 }
 
 // OnStop implements BaseService.
 func (p *peer) OnStop() {
-	if err := p.mconn.Stop(); err != nil { // stop everything and close the conn
-		p.Logger.Debug("Error while stopping peer", "err", err)
-	}
+	// if err := p.mconn.Stop(); err != nil { // stop everything and close the conn
+	// 	p.Logger.Debug("Error while stopping peer", "err", err)
+	// }
+	p.conn.Close("stopping peer")
 }
 
 // ---------------------------------------------------
@@ -271,8 +304,8 @@ func (p *peer) SocketAddr() *na.NetAddr {
 }
 
 // Status returns the peer's ConnectionStatus.
-func (p *peer) Status() tcpconn.ConnectionStatus {
-	return p.mconn.Status()
+func (p *peer) Status() any {
+	return p.conn.ConnectionState()
 }
 
 // Send msg bytes to the channel identified by chID byte. Returns false if the
@@ -280,7 +313,8 @@ func (p *peer) Status() tcpconn.ConnectionStatus {
 //
 // thread safe.
 func (p *peer) Send(e Envelope) bool {
-	return p.send(e.ChannelID, e.Message, p.mconn.Send)
+	p.conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+	return p.send(e.ChannelID, e.Message, p.conn.Write)
 }
 
 // TrySend msg bytes to the channel identified by chID byte. Immediately returns
@@ -288,29 +322,39 @@ func (p *peer) Send(e Envelope) bool {
 //
 // thread safe.
 func (p *peer) TrySend(e Envelope) bool {
-	return p.send(e.ChannelID, e.Message, p.mconn.TrySend)
+	p.conn.SetWriteDeadline(time.Now().Add(100 * time.Millisecond))
+	return p.send(e.ChannelID, e.Message, p.conn.Write)
 }
 
-func (p *peer) send(chID byte, msg proto.Message, sendFunc func(byte, []byte) bool) bool {
+func (p *peer) send(streamID byte, msg proto.Message, sendFunc func(byte, []byte) (int, error)) bool {
 	if !p.IsRunning() {
 		return false
-	} else if !p.HasChannel(chID) {
+	} else if !p.HasChannel(streamID) {
 		return false
 	}
+
 	msgType := getMsgType(msg)
 	if w, ok := msg.(types.Wrapper); ok {
 		msg = w.Wrap()
 	}
+
 	msgBytes, err := proto.Marshal(msg)
 	if err != nil {
-		p.Logger.Error("marshaling message to send", "error", err)
+		p.Logger.Error("Can't marshal msg", "err", err, "msg", msg)
 		return false
 	}
-	res := sendFunc(chID, msgBytes)
-	if res {
-		p.pendingMetrics.AddPendingSendBytes(msgType, len(msgBytes))
+
+	n, err := sendFunc(streamID, msgBytes)
+	if err != nil {
+		p.Logger.Error("Failed to send msg to stream", "err", err, "streamID", streamID, "msg", msg)
+		return false
+	} else if n != len(msgBytes) {
+		p.Logger.Error("Message not sent completely", "streamID", streamID, "msg", msg, "n", n, "len", len(msgBytes))
+		return false
 	}
-	return res
+
+	p.pendingMetrics.AddPendingSendBytes(msgType, n)
+	return true
 }
 
 // Get the data for a given key.
@@ -338,7 +382,7 @@ func (p *peer) HasChannel(chID byte) bool {
 }
 
 // Conn returns the underlying peer source connection.
-func (p *peer) Conn() net.Conn {
+func (p *peer) Conn() Connection {
 	return p.peerConn.conn
 }
 
@@ -360,12 +404,12 @@ func (p *peer) RemoteAddr() net.Addr {
 }
 
 // CanSend returns true if the send queue is not full, false otherwise.
-func (p *peer) CanSend(chID byte) bool {
-	if !p.IsRunning() {
-		return false
-	}
-	return p.mconn.CanSend(chID)
-}
+// func (p *peer) CanSend(chID byte) bool {
+// 	if !p.IsRunning() {
+// 		return false
+// 	}
+// 	return p.conn.CanSend(chID)
+// }
 
 // ---------------------------------------------------
 
@@ -433,30 +477,6 @@ func createMConnection(
 	config tcpconn.MConnConfig,
 ) *tcpconn.MConnection {
 	onReceive := func(chID byte, msgBytes []byte) {
-		reactor := reactorsByCh[chID]
-		if reactor == nil {
-			// Note that its ok to panic here as it's caught in the conn._recover,
-			// which does onPeerError.
-			panic(fmt.Sprintf("Unknown channel %X", chID))
-		}
-		mt := msgTypeByChID[chID]
-		msg := proto.Clone(mt)
-		err := proto.Unmarshal(msgBytes, msg)
-		if err != nil {
-			panic(fmt.Sprintf("unmarshaling message: %v into type: %s", err, reflect.TypeOf(mt)))
-		}
-		if w, ok := msg.(types.Unwrapper); ok {
-			msg, err = w.Unwrap()
-			if err != nil {
-				panic(fmt.Sprintf("unwrapping message: %v", err))
-			}
-		}
-		p.pendingMetrics.AddPendingRecvBytes(getMsgType(msg), len(msgBytes))
-		reactor.Receive(Envelope{
-			ChannelID: chID,
-			Src:       p,
-			Message:   msg,
-		})
 	}
 
 	onError := func(r any) {

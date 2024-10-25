@@ -377,6 +377,16 @@ func (mt *MultiplexTransport) upgrade(
 		}
 	}
 
+	// p.mconn = createMConnection(
+	// 	pc.conn,
+	// 	p,
+	// 	reactorsByCh,
+	// 	msgTypeByChID,
+	// 	streams,
+	// 	onPeerError,
+	// 	mConfig,
+	// )
+
 	return secretConn, nil
 }
 

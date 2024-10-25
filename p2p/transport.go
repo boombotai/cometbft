@@ -1,6 +1,7 @@
 package p2p
 
 import (
+	"net"
 	"time"
 
 	na "github.com/cometbft/cometbft/p2p/netaddr"
@@ -40,10 +41,10 @@ type Connection interface {
 	Write(streamID byte, b []byte) (n int, err error)
 
 	// LocalAddr returns the local network address, if known.
-	LocalAddr() na.NetAddr
+	LocalAddr() net.Addr
 
 	// RemoteAddr returns the remote network address, if known.
-	RemoteAddr() na.NetAddr
+	RemoteAddr() net.Addr
 
 	// SetDeadline sets the read and write deadlines associated
 	// with the connection. It is equivalent to calling both
