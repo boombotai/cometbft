@@ -86,6 +86,9 @@ type Testnet struct {
 	// node names in this list. It is set only from a command line flag.
 	LoadTargetNodes []string
 
+	// Latency Emulation is enabled when all the nodes have a zone assigned.
+	LatencyEmulationEnabled bool
+
 	// For generating transaction load on lanes proportionally to their
 	// priorities.
 	laneIDs               []string
@@ -271,8 +274,10 @@ func NewTestnetFromManifest(manifest Manifest, file string, ifd InfrastructureDa
 		}
 		if nodeManifest.Zone != "" {
 			node.Zone = nodeManifest.Zone
+			testnet.LatencyEmulationEnabled = true
 		} else if testnet.DefaultZone != "" {
 			node.Zone = testnet.DefaultZone
+			testnet.LatencyEmulationEnabled = true
 		}
 		// Configs are applied in order, so a local Config in Node
 		// should override a global config in Testnet.
@@ -460,7 +465,7 @@ func (t Testnet) Validate() error {
 	return nil
 }
 
-func (Testnet) validateZones(nodes []*Node) error {
+func (t *Testnet) validateZones(nodes []*Node) error {
 	allZones, _, err := LoadZoneLatenciesMatrix()
 	if err != nil {
 		return err
@@ -482,6 +487,10 @@ func (Testnet) validateZones(nodes []*Node) error {
 	// Either all nodes have a zone or none have.
 	if len(nodesWithoutZone) > 0 && len(nodesWithoutZone) != len(nodes) {
 		return fmt.Errorf("the following nodes do not have a zone assigned (while other nodes have): %v", strings.Join(nodesWithoutZone, ", "))
+	}
+
+	if len(nodesWithoutZone) > 0 && t.LatencyEmulationEnabled {
+		return fmt.Errorf("latency emulation is enabled but the following nodes do not have a zone assigned: %v", strings.Join(nodesWithoutZone, ", "))
 	}
 
 	return nil
