@@ -838,7 +838,11 @@ func (cs *State) handleMsg(mi msgInfo) {
 		cs.mtx.Unlock()
 
 		cs.mtx.Lock()
+		fmt.Println()
+		fmt.Printf("cs.Height blockpartsmsg: %d\n", cs.Height)
 		if added && cs.ProposalBlockParts.IsComplete() {
+			fmt.Println()
+			fmt.Printf("cs.Height handleCompleteProposal: %d\n", cs.Height)
 			cs.handleCompleteProposal(msg.Height)
 		}
 		if added {
@@ -1817,7 +1821,7 @@ func (cs *State) defaultSetProposal(proposal *types.Proposal) error {
 	// TODO: possibly catch double proposals
 
 	fmt.Println()
-	fmt.Println("cs.Height defaultSetProposal: %d\n", cs.Height)
+	fmt.Printf("cs.Height defaultSetProposal: %d\n", cs.Height)
 	if cs.Proposal != nil {
 		return nil
 	}
@@ -1951,6 +1955,8 @@ func (cs *State) handleCompleteProposal(blockHeight int64) {
 
 	if cs.Step <= cstypes.RoundStepPropose && cs.isProposalComplete() {
 		// Move onto the next step
+		fmt.Println()
+		fmt.Printf("cs.Height enteringPrevote: %d\n", cs.Height)
 		cs.enterPrevote(blockHeight, cs.Round)
 		if hasTwoThirds { // this is optimisation as this will be triggered when prevote is added
 			cs.enterPrecommit(blockHeight, cs.Round)
