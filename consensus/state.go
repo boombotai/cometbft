@@ -1815,6 +1815,9 @@ func (cs *State) recordMetrics(height int64, block *types.Block) {
 func (cs *State) defaultSetProposal(proposal *types.Proposal) error {
 	// Already have one
 	// TODO: possibly catch double proposals
+
+	fmt.Println()
+	fmt.Println("cs.Height defaultSetProposal: %d\n", cs.Height)
 	if cs.Proposal != nil {
 		return nil
 	}
